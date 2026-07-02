@@ -16,14 +16,41 @@ public final class AppRedirect {
 
     /// Call once in `application(_:didFinishLaunchingWithOptions:)` before any other SDK method.
     ///
+    /// Callable from any isolation context (`nonisolated`). When invoked on the main thread it runs
+    /// synchronously, so `shared` is set by the time this returns; off the main thread it hops.
+    ///
     /// - Parameter deferredDeepLink: attribution strategy. Defaults to `.fingerprintOnly`, which
     ///   never reads the clipboard (no iOS paste prompt). Use `.clipboardAndFingerprint` for higher
     ///   accuracy at the cost of one paste prompt on first launch.
-    public static func configure(
+    /// - Parameter delegate: optional runtime deep-link delegate, set atomically with configuration
+    ///   so callers never touch `shared` from a non-main context.
+    nonisolated public static func configure(
         apiKey: String,
         baseURL: URL,
         deferredDeepLink: DeferredDeepLinkMode = .fingerprintOnly,
-        logLevel: LogLevel = .none
+        logLevel: LogLevel = .none,
+        delegate: sending (any AppRedirectDelegate)? = nil
+    ) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                _configure(apiKey: apiKey, baseURL: baseURL, deferredDeepLink: deferredDeepLink,
+                           logLevel: logLevel, delegate: delegate)
+            }
+        } else {
+            Task { @MainActor in
+                _configure(apiKey: apiKey, baseURL: baseURL, deferredDeepLink: deferredDeepLink,
+                           logLevel: logLevel, delegate: delegate)
+            }
+        }
+    }
+
+    @MainActor
+    private static func _configure(
+        apiKey: String,
+        baseURL: URL,
+        deferredDeepLink: DeferredDeepLinkMode,
+        logLevel: LogLevel,
+        delegate: sending (any AppRedirectDelegate)?
     ) {
         Logger.level = logLevel
         let config = AppRedirectConfig(
@@ -33,15 +60,22 @@ public final class AppRedirect {
             deferredDeepLink: deferredDeepLink
         )
         let instance = AppRedirect(config: config)
+        instance.delegate = delegate
         shared = instance
         instance.queue.flush()   // resend anything stranded from a previous session
         Logger.debug("SDK configured — baseURL: \(baseURL)")
     }
 
+    /// Sets (or clears) the runtime deep-link delegate. `nonisolated` — hops to the main actor
+    /// internally. Prefer the `delegate:` parameter of `configure` when possible.
+    nonisolated public static func setDelegate(_ delegate: sending (any AppRedirectDelegate)?) {
+        Task { @MainActor in shared?.delegate = delegate }
+    }
+
     /// Clears local attribution state (e.g. on user logout). The next
     /// `checkDeferredDeepLink` will resolve attribution from scratch.
-    public static func reset() {
-        shared?.storage.reset()
+    nonisolated public static func reset() {
+        Task { @MainActor in shared?.storage.reset() }
     }
 
     // MARK: - Public properties
@@ -89,8 +123,8 @@ public final class AppRedirect {
     /// Forwards the clipboard `clickId` (when present) to the backend, which validates it and
     /// returns the authoritative attribution; otherwise falls back to server-side fingerprinting.
     /// Idempotent once resolved; retries transparently on transient failure until resolved.
-    public static func checkDeferredDeepLink() async -> DeepLinkResult? {
-        guard let sdk = shared else {
+    nonisolated public static func checkDeferredDeepLink() async -> DeepLinkResult? {
+        guard let sdk = await MainActor.run(body: { shared }) else {
             Logger.debug("checkDeferredDeepLink called before configure()")
             return nil
         }
@@ -99,7 +133,7 @@ public final class AppRedirect {
 
     /// Callback-based wrapper for `checkDeferredDeepLink()`.
     /// The completion is always called on the main thread.
-    public static func checkDeferredDeepLink(
+    nonisolated public static func checkDeferredDeepLink(
         completion: @escaping @MainActor (DeepLinkResult?) -> Void
     ) {
         Task { @MainActor in
@@ -110,51 +144,54 @@ public final class AppRedirect {
     // MARK: - App Open
 
     /// Call in `sceneDidBecomeActive` or `applicationDidBecomeActive` on every launch.
-    public static func trackAppOpen() {
-        guard let sdk = shared else { return }
-        sdk.queue.flush()
-        sdk.recordAppOpen(clickId: nil, deepLinkId: nil, source: nil, url: nil)
+    nonisolated public static func trackAppOpen() {
+        Task { @MainActor in
+            guard let sdk = shared else { return }
+            sdk.queue.flush()
+            sdk.recordAppOpen(clickId: nil, deepLinkId: nil, source: nil, url: nil)
+        }
     }
 
     // MARK: - Universal Links
 
     /// Call in `scene(_:willConnectTo:options:)` and `scene(_:continue:)`.
-    /// Returns `true` if the activity was handled by the SDK.
-    @discardableResult
-    public static func handleUserActivity(_ activity: NSUserActivity) -> Bool {
+    /// `nonisolated` — the Sendable `URL` is extracted synchronously and handling is dispatched
+    /// to the main actor, so callers never need a `Task { @MainActor }` wrapper.
+    nonisolated public static func handleUserActivity(_ activity: NSUserActivity) {
         guard activity.activityType == NSUserActivityTypeBrowsingWeb,
-              let url = activity.webpageURL,
-              let sdk = shared else { return false }
-        sdk.handleIncoming(url: url, source: .universalLink)
-        return true
+              let url = activity.webpageURL else { return }
+        Task { @MainActor in shared?.handleIncoming(url: url, source: .universalLink) }
     }
 
     // MARK: - Custom URL Scheme
 
-    /// Call in `application(_:open:options:)`.
-    /// Returns `true` if the URL was handled by the SDK.
-    @discardableResult
-    public static func handleOpenURL(_ url: URL) -> Bool {
-        guard let sdk = shared else { return false }
-        sdk.handleIncoming(url: url, source: .urlScheme)
-        return true
+    /// Call in `application(_:open:options:)`. `nonisolated` — `URL` is `Sendable`, so handling is
+    /// dispatched to the main actor without any caller-side wrapping.
+    nonisolated public static func handleOpenURL(_ url: URL) {
+        Task { @MainActor in shared?.handleIncoming(url: url, source: .urlScheme) }
     }
 
     // MARK: - Event Tracking
 
     /// Tracks a custom event optionally attributed to the last resolved deep link.
-    public static func track(_ event: String, properties: [String: Any]? = nil) {
-        guard let sdk = shared else {
-            Logger.debug("track called before configure()")
-            return
+    /// The non-`Sendable` `[String: Any]` is converted to a `Sendable` snapshot before the hop.
+    nonisolated public static func track(_ event: String, properties: [String: Any]? = nil) {
+        let json = properties?.toJSONValues()
+        Task { @MainActor in
+            guard let sdk = shared else {
+                Logger.debug("track called before configure()")
+                return
+            }
+            sdk.fireEvent(name: event, properties: json, revenue: nil)
         }
-        sdk.fireEvent(name: event, properties: properties, revenue: nil)
     }
 
     /// Convenience overload for revenue events.
-    public static func track(_ event: String, revenue: Decimal) {
-        guard let sdk = shared else { return }
-        sdk.fireEvent(name: event, properties: nil, revenue: revenue)
+    nonisolated public static func track(_ event: String, revenue: Decimal) {
+        Task { @MainActor in
+            guard let sdk = shared else { return }
+            sdk.fireEvent(name: event, properties: nil, revenue: revenue)
+        }
     }
 }
 
@@ -246,14 +283,14 @@ extension AppRedirect {
         sendOrQueue(path: "mobile/v1/app-open", payload: payload)
     }
 
-    func fireEvent(name: String, properties: [String: Any]?, revenue: Decimal?) {
+    func fireEvent(name: String, properties: [String: JSONValue]?, revenue: Decimal?) {
         let attribution = storage.savedAttribution
         let payload = TrackEventPayload(
             eventName: name,
             deepLinkId: attribution?.deepLinkId,
             clickId: attribution?.clickId,
             occurredAt: Date(),
-            properties: properties?.toJSONValues(),
+            properties: properties,
             revenue: revenue
         )
         sendOrQueue(path: "mobile/v1/events", payload: payload)

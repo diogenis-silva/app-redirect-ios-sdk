@@ -84,11 +84,20 @@ xcodebuild test \
 
 ## API pública
 
+> Toda a fachada estática (`configure`, `track`, `trackAppOpen`, `handleOpenURL`,
+> `handleUserActivity`, `checkDeferredDeepLink`, `reset`, `setDelegate`) é `nonisolated` —
+> chamável de **qualquer** contexto de isolamento, sem `Task { @MainActor in }` no app. O SDK
+> faz o hop para o main actor internamente. `handleOpenURL`/`handleUserActivity` retornam `Void`
+> (fire-and-forget). O `AppRedirectDelegate` continua `@MainActor` (entrega de deep link → UI).
+
 ### Inicialização — chamar em `application(_:didFinishLaunchingWithOptions:)`
 
 ```swift
 // Padrão: fingerprint apenas (~80%), sem prompt de colar do iOS
 AppRedirect.configure(apiKey: "dlk_...", baseURL: "https://api.seudominio.com")
+
+// Com delegate de deep link em runtime setado atomicamente
+AppRedirect.configure(apiKey: "dlk_...", baseURL: "https://api.seudominio.com", delegate: self)
 
 // Opt-in: clipboard + fingerprint (~95%), com 1 prompt de colar no first-open
 AppRedirect.configure(
@@ -193,7 +202,8 @@ usuário (`ClipboardChecker.clear()`).
 |---|---|---|
 | Dependências externas | Nenhuma | Foundation + UIKit são suficientes |
 | iOS mínimo | 16 | Cobre >98% dos dispositivos em 2026, URLSession async nativo |
-| Thread safety | `@MainActor` na fachada `AppRedirect` | Estado mutável (singleton, dedup) confinado a um ator |
+| Thread safety | Estado interno confinado ao `@MainActor`; **fachada pública `nonisolated`** | O estado mutável (singleton, dedup) segue no main actor, mas os entry points são chamáveis de qualquer contexto — o hop para o main actor acontece **dentro** do SDK. Assim o consumidor não precisa de `Task { @MainActor in }` (ex.: um `AnalyticsEngine` nonisolated). `configure` roda síncrono quando já no main (`assumeIsolated`) para setar `shared` sem corrida. |
+| Delegate | `AppRedirectDelegate` **permanece `@MainActor`** | Entrega de deep link dirige navegação/UI. Setável via parâmetro `delegate:` do `configure` (atômico) ou `setDelegate(_:)` — nenhum acesso a `shared` fora do main. |
 | Callbacks | Completion + async/await wrapper | Conveniência; ambos finalizam na main thread |
 | Falha de rede | Silenciosa ao app + fila/retry | SDK nunca deve crashar o app; eventos não se perdem offline |
 | Destino do clipboard | Validado server-side | Clipboard é spoofável; só o `clickId` é sinal, o backend dá o destino |

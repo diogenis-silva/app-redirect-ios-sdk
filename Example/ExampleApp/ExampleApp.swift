@@ -26,12 +26,12 @@ struct ExampleApp: App
                 .onOpenURL { url in
                     // Custom URL scheme (e.g. exampleapp://produto/42) while running.
                     store.note("onOpenURL → \(url.absoluteString)")
-                    _ = AppRedirect.handleOpenURL(url)
+                    AppRedirect.handleOpenURL(url)
                 }
                 .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
                     // Universal Links while running.
                     store.note("universalLink → \(activity.webpageURL?.absoluteString ?? "?")")
-                    _ = AppRedirect.handleUserActivity(activity)
+                    AppRedirect.handleUserActivity(activity)
                 }
         }
     }

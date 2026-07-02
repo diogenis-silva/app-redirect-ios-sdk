@@ -26,9 +26,9 @@ final class DeepLinkStore: ObservableObject, AppRedirectDelegate {
             baseURL: Self.baseURL,
             // Troque para .fingerprintOnly para o comportamento padrão (sem prompt de colar).
             deferredDeepLink: .clipboardAndFingerprint,
-            logLevel: .debug
+            logLevel: .debug,
+            delegate: self
         )
-        AppRedirect.shared?.delegate = self
         note("configure(baseURL: \(Self.baseURL.absoluteString))")
 
         status = "Resolvendo deferred deep link…"
