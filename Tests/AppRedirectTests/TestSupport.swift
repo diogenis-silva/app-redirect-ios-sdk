@@ -21,23 +21,39 @@ actor MockNetworking: Networking {
 
     private(set) var firstOpenCount = 0
     private(set) var lastFirstOpenPayload: FirstOpenPayload?
+    private(set) var resolveCount = 0
+    private(set) var lastResolvePayload: ResolvePayload?
     private(set) var sentPaths: [String] = []
 
     private var firstOpenMode: Mode
+    private var resolveMode: Mode
     private var sendShouldFail: Bool
 
-    init(firstOpen: Mode = .success(.fixture()), sendShouldFail: Bool = false) {
+    init(firstOpen: Mode = .success(.fixture()),
+         resolve: Mode = .success(.fixture()),
+         sendShouldFail: Bool = false) {
         self.firstOpenMode = firstOpen
+        self.resolveMode = resolve
         self.sendShouldFail = sendShouldFail
     }
 
     func setFirstOpen(_ mode: Mode) { firstOpenMode = mode }
+    func setResolve(_ mode: Mode) { resolveMode = mode }
     func setSendShouldFail(_ value: Bool) { sendShouldFail = value }
 
     func firstOpen(_ payload: FirstOpenPayload) async throws -> FirstOpenResponse {
         firstOpenCount += 1
         lastFirstOpenPayload = payload
         switch firstOpenMode {
+        case .success(let response): return response
+        case .failure:               throw AppRedirectError.invalidResponse
+        }
+    }
+
+    func resolve(_ payload: ResolvePayload) async throws -> FirstOpenResponse {
+        resolveCount += 1
+        lastResolvePayload = payload
+        switch resolveMode {
         case .success(let response): return response
         case .failure:               throw AppRedirectError.invalidResponse
         }
@@ -103,12 +119,14 @@ enum TestEnv {
     static let baseURL = URL(string: "https://api.test.local")!
 
     static func config(deferredDeepLink: DeferredDeepLinkMode = .fingerprintOnly,
+                       linkDomains: Set<String> = [],
                        clipboardMaxAge: TimeInterval = 300,
                        firstOpenRetryWindow: TimeInterval = 86_400) -> AppRedirectConfig {
         AppRedirectConfig(
             apiKey: "dlk_test",
             baseURL: baseURL,
             deferredDeepLink: deferredDeepLink,
+            linkDomains: linkDomains,
             clipboardMaxAge: clipboardMaxAge,
             firstOpenRetryWindow: firstOpenRetryWindow
         )

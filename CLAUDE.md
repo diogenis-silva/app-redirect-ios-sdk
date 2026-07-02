@@ -12,7 +12,7 @@ sdk-ios/
 ├── Package.swift                       ← Manifest SPM (iOS 16+, swift-tools-version 6.2)
 ├── Sources/AppRedirect/                ← Código-fonte do SDK
 │   ├── AppRedirect.swift               ← Ponto de entrada público (orquestração)
-│   ├── AppRedirectConfig.swift         ← apiKey, baseURL, logLevel, janelas de retry
+│   ├── AppRedirectConfig.swift         ← apiKey, baseURL, logLevel, linkDomains, janelas de retry
 │   ├── AppRedirectClient.swift         ← HTTP client (URLSession) + encoder compartilhado
 │   ├── AppRedirectStorage.swift        ← UserDefaults: isFirstOpen, attribution, installDate
 │   ├── AppRedirectDelegate.swift       ← Protocolo de callback de deep link em runtime
@@ -26,14 +26,14 @@ sdk-ios/
 │   │   └── ClipboardChecker.swift      ← Lê UIPasteboard → valida payload appredirect://
 │   └── Models/
 │       ├── FirstOpenPayload.swift  · FirstOpenResponse.swift
-│       ├── AppOpenPayload.swift
+│       ├── AppOpenPayload.swift  · ResolvePayload.swift
 │       └── TrackEventPayload.swift
 ├── Tests/AppRedirectTests/             ← Testes unitários (framework Testing, Swift 6)
 │   ├── TestSupport.swift               ← MockNetworking (actor) + fixtures/helpers
 │   ├── JSONValueTests.swift            ├ DecodingTests.swift (decode tolerante)
 │   ├── AppRedirectStorageTests.swift   ├ ClipboardCheckerTests.swift
 │   ├── EventQueueTests.swift           ├ DeferredDeepLinkTests.swift (retry + clipboard)
-│   └── AppOpenDedupTests.swift
+│   ├── AppOpenDedupTests.swift         └ ResolveUniversalLinkTests.swift (resolve ao vivo)
 └── Example/                            ← app de exemplo (ignorado pelo SPM)
     ├── ExampleApp.xcodeproj            ← referencia o pacote em ".." (relativePath)
     └── ExampleApp/                     ← ExampleApp · ContentView · DeepLinkStore
@@ -99,6 +99,14 @@ AppRedirect.configure(apiKey: "dlk_...", baseURL: "https://api.seudominio.com")
 // Com delegate de deep link em runtime setado atomicamente
 AppRedirect.configure(apiKey: "dlk_...", baseURL: "https://api.seudominio.com", delegate: self)
 
+// Com domínios de link — necessário para resolver Universal Links "ao vivo" (app instalado)
+AppRedirect.configure(
+    apiKey: "dlk_...",
+    baseURL: "https://api.seudominio.com",
+    linkDomains: ["ntxlvl.fernandagazzotto.com.br"],
+    delegate: self
+)
+
 // Opt-in: clipboard + fingerprint (~95%), com 1 prompt de colar no first-open
 AppRedirect.configure(
     apiKey: "dlk_...",
@@ -133,6 +141,15 @@ Idempotente: se já foi chamado antes (UserDefaults flag), retorna `nil` imediat
 AppRedirect.handleUserActivity(activity)
 ```
 
+> **Universal Link "ao vivo" (app já instalado).** Quando o iOS abre o app direto pelo Universal
+> Link, a página web de redirect nunca roda, então a URL recebida (ex.: `.../download`) **não traz**
+> o destino configurado nem `clickId`/`deepLinkId`. Se o host casar com `config.linkDomains` (match
+> por sufixo, cobrindo `www.` e subdomínios) e não houver IDs inline, o SDK chama
+> `POST /mobile/v1/resolve` e entrega o **destino configurado** ao `delegate` — não a URL crua. É por
+> isso que `linkDomains` precisa ser informado no `configure`; sem ele, o comportamento antigo (ecoar
+> a URL) é mantido. URLs que já trazem `clickId`/`c`/`deepLinkId`/`dl` seguem pela via inline síncrona,
+> sem round-trip. Falha de rede no resolve **não** roteia (evita tela errada); só registra o app-open.
+
 ### Custom URL Scheme — chamar em `application(_:open:options:)`
 
 ```swift
@@ -156,6 +173,7 @@ Em desenvolvimento: `http://localhost:5129`.
 | `POST /mobile/v1/first-open` | Primeira abertura após instalação |
 | `POST /mobile/v1/app-open` | Toda abertura subsequente |
 | `POST /mobile/v1/events` | Eventos customizados |
+| `POST /mobile/v1/resolve` | Universal Link "ao vivo" (app instalado) de um domínio em `linkDomains`, sem IDs inline |
 
 Auth: header `X-Api-Key: dlk_...` (gerada no Admin Panel, associada ao App).
 
@@ -191,6 +209,7 @@ usuário (`ClipboardChecker.clear()`).
 | `first-open` | `isFirstOpenDone` só é marcado **após** resolução real (clipboard validado ou API 200). Falha de rede **não** marca como feito → retry transparente no próximo cold start, dentro de `firstOpenRetryWindow` (24h). Após a janela, desiste para não tentar para sempre. |
 | `app-open` / `events` | Fila persistente em disco (`EventQueue`, Application Support). Em falha de rede, o request é enfileirado e reenviado no próximo `trackAppOpen`/`configure`. At-least-once, FIFO, cap de 200 (descarta os mais antigos). `first-open` **não** entra na fila (tem retry próprio). |
 | Cliques diretos (Universal Link / URL scheme) | `handleIncoming` extrai `clickId`/`deepLinkId` da URL (`clickId`/`c`, `deepLinkId`/`dl`), reporta o `app-open` com o link clicado e persiste como atribuição de re-engajamento. |
+| Universal Link "ao vivo" sem IDs (app instalado) | Se o host casar com `config.linkDomains`, `resolveAndDeliver` chama `POST /mobile/v1/resolve`, persiste a atribuição retornada e entrega o **destino configurado** ao delegate (não a URL crua). Falha de rede não roteia. |
 | Dedup de `app-open` | Debounce de 2s em memória evita contagem dupla quando Universal Link + `sceneDidBecomeActive` disparam juntos; um open com `clickId` sempre passa. |
 | Modo de atribuição | `deferredDeepLink`: `.fingerprintOnly` (padrão, sem prompt) ou `.clipboardAndFingerprint` (opt-in, ~95%, 1 prompt). O clipboard só é lido no modo opt-in. |
 | `confidence` | Escala **0–100**, vinda do backend (sem valor hardcoded no SDK). |

@@ -11,5 +11,6 @@ import Foundation
 /// against a mock instead of a live `URLSession`.
 protocol Networking: Sendable {
     func firstOpen(_ payload: FirstOpenPayload) async throws -> FirstOpenResponse
+    func resolve(_ payload: ResolvePayload) async throws -> FirstOpenResponse
     func send(path: String, bodyData: Data) async throws
 }

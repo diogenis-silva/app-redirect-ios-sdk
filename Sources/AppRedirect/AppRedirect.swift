@@ -24,22 +24,26 @@ public final class AppRedirect {
     ///   accuracy at the cost of one paste prompt on first launch.
     /// - Parameter delegate: optional runtime deep-link delegate, set atomically with configuration
     ///   so callers never touch `shared` from a non-main context.
+    /// - Parameter linkDomains: App Redirect link domains (e.g. `ntxlvl.fernandagazzotto.com.br`).
+    ///   A live Universal Link whose host matches one of these is resolved against the backend so
+    ///   the SDK can hand back the configured destination even when the app was already installed.
     nonisolated public static func configure(
         apiKey: String,
         baseURL: URL,
         deferredDeepLink: DeferredDeepLinkMode = .fingerprintOnly,
+        linkDomains: Set<String> = [],
         logLevel: LogLevel = .none,
         delegate: sending (any AppRedirectDelegate)? = nil
     ) {
         if Thread.isMainThread {
             MainActor.assumeIsolated {
                 _configure(apiKey: apiKey, baseURL: baseURL, deferredDeepLink: deferredDeepLink,
-                           logLevel: logLevel, delegate: delegate)
+                           linkDomains: linkDomains, logLevel: logLevel, delegate: delegate)
             }
         } else {
             Task { @MainActor in
                 _configure(apiKey: apiKey, baseURL: baseURL, deferredDeepLink: deferredDeepLink,
-                           logLevel: logLevel, delegate: delegate)
+                           linkDomains: linkDomains, logLevel: logLevel, delegate: delegate)
             }
         }
     }
@@ -49,6 +53,7 @@ public final class AppRedirect {
         apiKey: String,
         baseURL: URL,
         deferredDeepLink: DeferredDeepLinkMode,
+        linkDomains: Set<String>,
         logLevel: LogLevel,
         delegate: sending (any AppRedirectDelegate)?
     ) {
@@ -57,7 +62,8 @@ public final class AppRedirect {
             apiKey: apiKey,
             baseURL: baseURL,
             logLevel: logLevel,
-            deferredDeepLink: deferredDeepLink
+            deferredDeepLink: deferredDeepLink,
+            linkDomains: linkDomains
         )
         let instance = AppRedirect(config: config)
         instance.delegate = delegate
@@ -246,6 +252,13 @@ extension AppRedirect {
         let clickId    = uuid(params["clickId"]) ?? uuid(params["c"])
         let deepLinkId = uuid(params["deepLinkId"]) ?? uuid(params["dl"])
 
+        // A live Universal Link for an already-installed app carries no inline identifiers and the
+        // redirect web page never ran — so the destination lives only on the backend. Resolve it.
+        if clickId == nil, deepLinkId == nil, isAppRedirectDomain(url) {
+            Task { await resolveAndDeliver(url: url, source: source) }
+            return
+        }
+
         let result = DeepLinkResult(
             hasDeepLink: true,
             destination: url.absoluteString,
@@ -265,6 +278,49 @@ extension AppRedirect {
 
         delegate?.appRedirect(self, didReceiveDeepLink: result)
         recordAppOpen(clickId: clickId, deepLinkId: deepLinkId, source: source, url: url.absoluteString)
+    }
+
+    /// Resolves a live Universal Link against the backend and delivers the configured destination.
+    /// On failure it logs and records a generic app-open, without routing the user to a wrong screen.
+    func resolveAndDeliver(url: URL, source: DeepLinkSource) async {
+        let device = DeviceInfo.collect()
+        let payload = ResolvePayload(
+            url: url.absoluteString,
+            platform: device.platform,
+            appVersion: device.appVersion,
+            osVersion: device.osVersion,
+            deviceModel: device.deviceModel,
+            language: device.language
+        )
+
+        do {
+            let response = try await client.resolve(payload)
+            guard response.hasDeepLink else {
+                Logger.debug("resolve: no deep link for \(url.absoluteString)")
+                recordAppOpen(clickId: nil, deepLinkId: nil, source: source, url: url.absoluteString)
+                return
+            }
+
+            let result = response.toDeepLinkResult(source: source)
+            storage.savedAttribution = result
+
+            recordAppOpen(clickId: result.clickId, deepLinkId: result.deepLinkId,
+                          source: source, url: url.absoluteString)
+            delegate?.appRedirect(self, didReceiveDeepLink: result)
+        } catch {
+            Logger.debug("resolve failed for \(url.absoluteString): \(error)")
+            recordAppOpen(clickId: nil, deepLinkId: nil, source: source, url: url.absoluteString)
+        }
+    }
+
+    /// Whether the URL host belongs to a configured App Redirect link domain (suffix match, so
+    /// `www.` and other subdomains of a configured domain are also covered).
+    func isAppRedirectDomain(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased(), !config.linkDomains.isEmpty else { return false }
+        return config.linkDomains.contains { domain in
+            let d = domain.lowercased()
+            return host == d || host.hasSuffix("." + d)
+        }
     }
 
     func recordAppOpen(clickId: UUID?, deepLinkId: UUID?, source: DeepLinkSource?, url: String?) {

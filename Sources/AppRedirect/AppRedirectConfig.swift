@@ -15,6 +15,11 @@ public struct AppRedirectConfig: Sendable {
     /// Deferred deep link strategy. Defaults to `.fingerprintOnly` (no clipboard, no paste prompt).
     public let deferredDeepLink: DeferredDeepLinkMode
 
+    /// App Redirect link domains (e.g. `ntxlvl.fernandagazzotto.com.br`). When a live Universal Link
+    /// arrives whose host matches one of these (by suffix), the SDK resolves it against the backend
+    /// to obtain the configured destination. Universal Links from other domains are left untouched.
+    public let linkDomains: Set<String>
+
     public let clipboardMaxAge: TimeInterval
     public let requestTimeout: TimeInterval
 
@@ -27,6 +32,7 @@ public struct AppRedirectConfig: Sendable {
         baseURL: URL,
         logLevel: LogLevel = .none,
         deferredDeepLink: DeferredDeepLinkMode = .fingerprintOnly,
+        linkDomains: Set<String> = [],
         clipboardMaxAge: TimeInterval = 300,
         requestTimeout: TimeInterval = 10,
         firstOpenRetryWindow: TimeInterval = 86_400
@@ -35,6 +41,7 @@ public struct AppRedirectConfig: Sendable {
         self.baseURL = baseURL
         self.logLevel = logLevel
         self.deferredDeepLink = deferredDeepLink
+        self.linkDomains = linkDomains
         self.clipboardMaxAge = clipboardMaxAge
         self.requestTimeout = requestTimeout
         self.firstOpenRetryWindow = firstOpenRetryWindow

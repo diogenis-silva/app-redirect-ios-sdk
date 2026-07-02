@@ -34,6 +34,11 @@ final class AppRedirectClient: Networking {
         return try await execute(req)
     }
 
+    func resolve(_ payload: ResolvePayload) async throws -> FirstOpenResponse {
+        let req = try makeRequest(path: "mobile/v1/resolve", body: payload)
+        return try await execute(req)
+    }
+
     /// Sends a pre-encoded body. Used by the retry queue to resend stored requests.
     func send(path: String, bodyData: Data) async throws {
         var req = baseRequest(path: path)
